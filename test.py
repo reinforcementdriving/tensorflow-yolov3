@@ -6,50 +6,48 @@
 #   Editor      : VIM
 #   File name   : test.py
 #   Author      : YunYang1994
-#   Created date: 2018-11-30 15:56:37
+#   Created date: 2018-12-20 11:58:21
 #   Description :
 #
 #================================================================
 
-import cv2
-import time
-import numpy as np
 import tensorflow as tf
-from PIL import Image
-from core import utils
+from core import utils, yolov3
 
+INPUT_SIZE = 416
+BATCH_SIZE = 16
+EPOCHS = 313
+SHUFFLE_SIZE = 1000
+WEIGHTS_PATH = "./checkpoint/yolov3.ckpt"
 
-SIZE = [416, 416]
-video_path = "./data/demo_data/road.mp4"
-classes = utils.get_classes('./data/coco.names')
+sess = tf.Session()
+classes = utils.read_coco_names('./data/coco.names')
 num_classes = len(classes)
-input_tensor, output_tensors = utils.read_pb_return_tensors(tf.get_default_graph(),
-                                                            "./checkpoint/yolov3_cpu_nms.pb",
-                                                            ["Placeholder:0", "concat:0", "mul:0"])
-with tf.Session() as sess:
-    vid = cv2.VideoCapture(video_path)
-    while True:
-        return_value, frame = vid.read()
-        if return_value:
-            image = Image.fromarray(frame)
-        else:
-            raise ValueError("No image!")
-        img_resized = np.array(image.resize(size=tuple(SIZE)), dtype=np.float32)
-        prev_time = time.time()
+file_pattern = "../COCO/val_tfrecords/coco_val*.tfrecords"
+anchors = utils.get_anchors('./data/yolo_anchors.txt')
 
-        boxes, scores = sess.run(output_tensors, feed_dict={input_tensor: np.expand_dims(img_resized, axis=0)})
-        boxes, scores, labels = utils.cpu_nms(boxes, scores, num_classes, score_thresh=0.4, iou_thresh=0.5)
-        image = utils.draw_boxes(boxes, scores, labels, image, classes, SIZE, show=False)
+dataset = tf.data.TFRecordDataset(filenames = tf.gfile.Glob(file_pattern))
+dataset = dataset.map(utils.parser(anchors, num_classes).parser_example, num_parallel_calls = 10)
+dataset = dataset.repeat().shuffle(SHUFFLE_SIZE).batch(BATCH_SIZE).prefetch(BATCH_SIZE)
+iterator = dataset.make_one_shot_iterator()
+example = iterator.get_next()
+saver = tf.train.Saver()
 
-        curr_time = time.time()
-        exec_time = curr_time - prev_time
-        result = np.asarray(image)
-        info = "time: %.2f ms" %(1000*exec_time)
-        cv2.putText(result, text=info, org=(50, 70), fontFace=cv2.FONT_HERSHEY_SIMPLEX,
-                    fontScale=1, color=(255, 0, 0), thickness=2)
-        cv2.namedWindow("result", cv2.WINDOW_AUTOSIZE)
-        cv2.imshow("result", result)
-        if cv2.waitKey(1) & 0xFF == ord('q'): break
+images, *y_true = example
+model = yolov3.yolov3(num_classes)
+with tf.variable_scope('yolov3'):
+    y_pred = model.forward(images, is_training=False)
+    y_pred = model.predict(y_pred)
+
+saver.restore(sess, save_path=WEIGHTS_PATH)
+for epoch in range(EPOCHS):
+    run_items = sess.run([y_pred, y_true])
+    rec, prec, mAP = utils.evaluate(run_items[1], run_items[2], num_classes)
+    print("=> EPOCH:%10d\trec:%.2f\tprec:%.2f\tmAP:%.2f" %(rec, prec, mAP))
+
+
+
+
 
 
 
